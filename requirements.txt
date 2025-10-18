@@ -1,5 +1,6 @@
-streamlit
-mediapipe
-opencv-python-headless
-numpy
-Pillow
+streamlit==1.29.0
+mediapipe==0.10.1
+opencv-python-headless==4.8.1.78
+numpy==1.25.0
+matplotlib==3.7.1
+Pillow==10.0.0
