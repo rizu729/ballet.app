@@ -1,5 +1,4 @@
 import os
-import io
 import cv2
 import numpy as np
 import tempfile
@@ -35,19 +34,20 @@ def draw_skeleton_on_frame(frame, results_pose_landmarks, line_color=(255, 0, 0)
     return frame
 
 
-# ---- 動画→フレーム/骨格抽出（bytes/strのみ受け取り：キャッシュ安定）----
+# ---- 動画→フレーム/骨格抽出（_付き引数＝キャッシュ対象外にしてUnhashable回避）----
 @st.cache_data(show_spinner=False, hash_funcs={bytes: lambda b: hashlib.md5(b).hexdigest()})
-def extract_frames_and_skeletons(file_bytes: bytes, filename: str, model_complexity=1, max_frame_height=640):
+def extract_frames_and_skeletons(_file_bytes: bytes, _filename: str,
+                                 model_complexity=1, max_frame_height=640):
     """
-    file_bytes: 動画の生バイト
-    filename  : 元のファイル名（拡張子取得に使用）
+    _file_bytes/_filename は先頭に '_' を付けてキャッシュのハッシュ対象から除外
+    → UploadedFileや独自クラス経由でも Unhashable エラーを回避
     """
-    if not file_bytes:
+    if not _file_bytes:
         return [], [], 0, 0, 0
 
-    suffix = os.path.splitext(filename)[1] or ".mp4"
+    suffix = os.path.splitext(_filename)[1] or ".mp4"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(file_bytes)
+        tmp.write(_file_bytes)
         temp_path = tmp.name
 
     try:
@@ -67,7 +67,7 @@ def extract_frames_and_skeletons(file_bytes: bytes, filename: str, model_complex
             nh = max_frame_height
             nw = max(1, int(ow * (max_frame_height / oh)))
 
-        bar = st.progress(0, text=f"処理中: {os.path.basename(filename)}") if total > 0 else None
+        bar = st.progress(0, text=f"処理中: {os.path.basename(_filename)}") if total > 0 else None
 
         with mp_pose.Pose(
             static_image_mode=False,
@@ -91,7 +91,7 @@ def extract_frames_and_skeletons(file_bytes: bytes, filename: str, model_complex
                 idx += 1
                 if bar and total > 0:
                     pct = min(100, int(idx / total * 100))
-                    bar.progress(pct, text=f"処理中: {os.path.basename(filename)} {pct}%")
+                    bar.progress(pct, text=f"処理中: {os.path.basename(_filename)} {pct}%")
 
         if bar:
             bar.empty()
@@ -156,6 +156,7 @@ if files:
         st.session_state["last_files_sig"] = sig
         st.session_state["filebufs"] = []
         for f in files[:2]:
+            # iPhone/Safariでも安定するよう getvalue() で生バイト確保
             st.session_state["filebufs"].append({"name": f.name, "bytes": f.getvalue()})
         for i in [1, 2]:
             st.session_state[f'frames{i}'] = []
@@ -169,9 +170,13 @@ bufs = st.session_state.get("filebufs", [])
 if submitted and len(bufs) >= 2:
     if not st.session_state.frames1:
         with st.spinner("1つ目の動画を処理中..."):
-            st.session_state.frames1, st.session_state.landmarks1, st.session_state.w1, st.session_state.h1, st.session_state.fps1 = extract_frames_and_skeletons(
-                file_bytes=bufs[0]["bytes"],
-                filename=bufs[0]["name"],
+            (st.session_state.frames1,
+             st.session_state.landmarks1,
+             st.session_state.w1,
+             st.session_state.h1,
+             st.session_state.fps1) = extract_frames_and_skeletons(
+                _file_bytes=bufs[0]["bytes"],
+                _filename=bufs[0]["name"],
                 model_complexity=model_complexity_option,
                 max_frame_height=MAX_FRAME_HEIGHT
             )
@@ -179,9 +184,13 @@ if submitted and len(bufs) >= 2:
 
     if not st.session_state.frames2:
         with st.spinner("2つ目の動画を処理中..."):
-            st.session_state.frames2, st.session_state.landmarks2, st.session_state.w2, st.session_state.h2, st.session_state.fps2 = extract_frames_and_skeletons(
-                file_bytes=bufs[1]["bytes"],
-                filename=bufs[1]["name"],
+            (st.session_state.frames2,
+             st.session_state.landmarks2,
+             st.session_state.w2,
+             st.session_state.h2,
+             st.session_state.fps2) = extract_frames_and_skeletons(
+                _file_bytes=bufs[1]["bytes"],
+                _filename=bufs[1]["name"],
                 model_complexity=model_complexity_option,
                 max_frame_height=MAX_FRAME_HEIGHT
             )
