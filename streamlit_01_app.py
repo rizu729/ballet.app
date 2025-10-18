@@ -34,20 +34,20 @@ def draw_skeleton_on_frame(frame, results_pose_landmarks, line_color=(255, 0, 0)
     return frame
 
 
-# ---- 動画→フレーム/骨格抽出（_付き引数＝キャッシュ対象外にしてUnhashable回避）----
+# ---- 動画→フレーム/骨格抽出（bytes/strのみ。キャッシュは bytes をMD5で正規化）----
 @st.cache_data(show_spinner=False, hash_funcs={bytes: lambda b: hashlib.md5(b).hexdigest()})
-def extract_frames_and_skeletons(_file_bytes: bytes, _filename: str,
+def extract_frames_and_skeletons(file_bytes: bytes, filename: str,
                                  model_complexity=1, max_frame_height=640):
     """
-    _file_bytes/_filename は先頭に '_' を付けてキャッシュのハッシュ対象から除外
-    → UploadedFileや独自クラス経由でも Unhashable エラーを回避
+    file_bytes: 動画の生バイト
+    filename  : 元のファイル名（拡張子取得や表示に使用）
     """
-    if not _file_bytes:
+    if not file_bytes:
         return [], [], 0, 0, 0
 
-    suffix = os.path.splitext(_filename)[1] or ".mp4"
+    suffix = os.path.splitext(filename)[1] or ".mp4"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(_file_bytes)
+        tmp.write(file_bytes)
         temp_path = tmp.name
 
     try:
@@ -67,7 +67,7 @@ def extract_frames_and_skeletons(_file_bytes: bytes, _filename: str,
             nh = max_frame_height
             nw = max(1, int(ow * (max_frame_height / oh)))
 
-        bar = st.progress(0, text=f"処理中: {os.path.basename(_filename)}") if total > 0 else None
+        bar = st.progress(0, text=f"処理中: {os.path.basename(filename)}") if total > 0 else None
 
         with mp_pose.Pose(
             static_image_mode=False,
@@ -91,7 +91,7 @@ def extract_frames_and_skeletons(_file_bytes: bytes, _filename: str,
                 idx += 1
                 if bar and total > 0:
                     pct = min(100, int(idx / total * 100))
-                    bar.progress(pct, text=f"処理中: {os.path.basename(_filename)} {pct}%")
+                    bar.progress(pct, text=f"処理中: {os.path.basename(filename)} {pct}%")
 
         if bar:
             bar.empty()
@@ -175,8 +175,8 @@ if submitted and len(bufs) >= 2:
              st.session_state.w1,
              st.session_state.h1,
              st.session_state.fps1) = extract_frames_and_skeletons(
-                _file_bytes=bufs[0]["bytes"],
-                _filename=bufs[0]["name"],
+                file_bytes=bufs[0]["bytes"],
+                filename=bufs[0]["name"],
                 model_complexity=model_complexity_option,
                 max_frame_height=MAX_FRAME_HEIGHT
             )
@@ -189,8 +189,8 @@ if submitted and len(bufs) >= 2:
              st.session_state.w2,
              st.session_state.h2,
              st.session_state.fps2) = extract_frames_and_skeletons(
-                _file_bytes=bufs[1]["bytes"],
-                _filename=bufs[1]["name"],
+                file_bytes=bufs[1]["bytes"],
+                filename=bufs[1]["name"],
                 model_complexity=model_complexity_option,
                 max_frame_height=MAX_FRAME_HEIGHT
             )
