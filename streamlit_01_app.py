@@ -1,12 +1,13 @@
 import os
 import io
-import tempfile
 import cv2
 import numpy as np
+import tempfile
+import hashlib
 import streamlit as st
 import mediapipe as mp
 
-# ----（任意）うるさい警告を抑制 ----
+# ----（任意）警告を抑制（必要なエラーのみ表示）----
 os.environ["GLOG_minloglevel"] = "2"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 try:
@@ -19,14 +20,6 @@ except Exception:
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
-# ---- メモリ退避用ラッパ ----
-class MemFile:
-    """StreamlitのUploadedFileから取り出したバイト列を、getbuffer()互換で扱うための簡易クラス"""
-    def __init__(self, name: str, data: bytes):
-        self.name = name
-        self._data = data
-    def getbuffer(self):
-        return self._data
 
 # ---- 骨格描画 ----
 def draw_skeleton_on_frame(frame, results_pose_landmarks, line_color=(255, 0, 0)):
@@ -41,18 +34,20 @@ def draw_skeleton_on_frame(frame, results_pose_landmarks, line_color=(255, 0, 0)
         )
     return frame
 
-# ---- 動画→フレーム/骨格抽出 ----
-@st.cache_data(show_spinner=False)
-def extract_frames_and_skeletons(uploaded_file, model_complexity=1, max_frame_height=640):
+
+# ---- 動画→フレーム/骨格抽出（bytes/strのみ受け取り：キャッシュ安定）----
+@st.cache_data(show_spinner=False, hash_funcs={bytes: lambda b: hashlib.md5(b).hexdigest()})
+def extract_frames_and_skeletons(file_bytes: bytes, filename: str, model_complexity=1, max_frame_height=640):
     """
-    uploaded_file: getbuffer() を持つオブジェクト（Streamlit UploadedFile でも MemFile でもOK）
+    file_bytes: 動画の生バイト
+    filename  : 元のファイル名（拡張子取得に使用）
     """
-    if uploaded_file is None:
+    if not file_bytes:
         return [], [], 0, 0, 0
 
-    suffix = os.path.splitext(uploaded_file.name)[1] or ".mp4"
+    suffix = os.path.splitext(filename)[1] or ".mp4"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.getbuffer())
+        tmp.write(file_bytes)
         temp_path = tmp.name
 
     try:
@@ -72,7 +67,7 @@ def extract_frames_and_skeletons(uploaded_file, model_complexity=1, max_frame_he
             nh = max_frame_height
             nw = max(1, int(ow * (max_frame_height / oh)))
 
-        bar = st.progress(0, text=f"処理中: {uploaded_file.name}") if total > 0 else None
+        bar = st.progress(0, text=f"処理中: {os.path.basename(filename)}") if total > 0 else None
 
         with mp_pose.Pose(
             static_image_mode=False,
@@ -96,7 +91,7 @@ def extract_frames_and_skeletons(uploaded_file, model_complexity=1, max_frame_he
                 idx += 1
                 if bar and total > 0:
                     pct = min(100, int(idx / total * 100))
-                    bar.progress(pct, text=f"処理中: {uploaded_file.name} {pct}%")
+                    bar.progress(pct, text=f"処理中: {os.path.basename(filename)} {pct}%")
 
         if bar:
             bar.empty()
@@ -108,21 +103,22 @@ def extract_frames_and_skeletons(uploaded_file, model_complexity=1, max_frame_he
         except Exception:
             pass
 
-# ---- UI 設定 ----
+
+# ---- UI 基本設定 ----
 st.set_page_config(layout="wide", page_title="バレエフォーム比較AI")
 st.title("💃 バレエフォーム比較AI")
 
 st.markdown("""
 ### 📖 使い方
 1. 下のアップロード欄で **2本まとめて** 動画を選択してください（順に **青 → 赤** として扱います）。
-2. **解析を開始** を押すと骨格推定がはじまり、フレームごとに横並びで比較できます。
+2. **解析を開始** を押すと骨格推定が始まり、フレームごとに横並びで比較できます。
 3. フレーム番号は **手入力** と **スライダー** の両方で細かく調整できます。
 
 ⚠️ **推奨**：10〜20秒・720p以下・**H.264(MP4)**。  
 iPhone標準の高圧縮 **.mov(HEVC)** は失敗しやすいです。**Wi-Fi** 推奨、アップロード中は画面を閉じないでください。
 """)
 
-# ---- モデル複雑さ ----
+# ---- モデル精度/速度 ----
 model_complexity_option = st.selectbox(
     "ポーズ推定モデルの精度/速度",
     options=[(0, "低（高速）"), (1, "中（バランス）"), (2, "高（精密）")],
@@ -130,7 +126,7 @@ model_complexity_option = st.selectbox(
     index=1
 )[0]
 
-MAX_FRAME_HEIGHT = 640
+MAX_FRAME_HEIGHT = 640  # 重ければ 480 に下げるとさらに安定
 
 # ---- セッション初期化 ----
 for i in [1, 2]:
@@ -143,7 +139,7 @@ for i in [1, 2]:
 st.session_state.setdefault("last_files_sig", None)
 st.session_state.setdefault("filebufs", [])
 
-# ---- 同時アップロード + 送信ボタン + メモリ退避（ここが最重要）----
+# ---- 同時アップロード + 送信ボタン（フォームでセッション安定化）----
 with st.form(key="upload_form", clear_on_submit=False):
     files = st.file_uploader(
         "動画を **2本まとめて** アップロード（順に 青 → 赤 として扱います）",
@@ -153,7 +149,7 @@ with st.form(key="upload_form", clear_on_submit=False):
     st.info("⚠️ 推奨: 10〜20秒以内・720p以下・H.264(MP4)。iPhoneの高圧縮MOV(HEVC)は失敗しやすいです。Wi-Fiで、アップロード中は画面を閉じないでください。")
     submitted = st.form_submit_button("解析を開始")
 
-# 新しい選択が来たら生バイトをセッションに退避（URL失効対策）
+# 新しい選択が来たら生バイト退避（URL失効対策）＆前回結果クリア
 if files:
     sig = tuple((f.name, f.size) for f in files[:2])
     if st.session_state["last_files_sig"] != sig:
@@ -161,44 +157,46 @@ if files:
         st.session_state["filebufs"] = []
         for f in files[:2]:
             st.session_state["filebufs"].append({"name": f.name, "bytes": f.getvalue()})
-        # 以前の結果をクリア
         for i in [1, 2]:
             st.session_state[f'frames{i}'] = []
             st.session_state[f'landmarks{i}'] = []
             st.session_state[f'w{i}'] = st.session_state[f'h{i}'] = st.session_state[f'fps{i}'] = 0
             st.session_state[f'frame_index{i}'] = 0
 
-# フォーム送信で確定
-uploaded_file1 = uploaded_file2 = None
 bufs = st.session_state.get("filebufs", [])
+
+# ---- 送信時のみ解析実行（再実行に強い）----
 if submitted and len(bufs) >= 2:
-    uploaded_file1 = MemFile(bufs[0]["name"], bufs[0]["bytes"])
-    uploaded_file2 = MemFile(bufs[1]["name"], bufs[1]["bytes"])
+    if not st.session_state.frames1:
+        with st.spinner("1つ目の動画を処理中..."):
+            st.session_state.frames1, st.session_state.landmarks1, st.session_state.w1, st.session_state.h1, st.session_state.fps1 = extract_frames_and_skeletons(
+                file_bytes=bufs[0]["bytes"],
+                filename=bufs[0]["name"],
+                model_complexity=model_complexity_option,
+                max_frame_height=MAX_FRAME_HEIGHT
+            )
+        st.session_state.frame_index1 = 0
+
+    if not st.session_state.frames2:
+        with st.spinner("2つ目の動画を処理中..."):
+            st.session_state.frames2, st.session_state.landmarks2, st.session_state.w2, st.session_state.h2, st.session_state.fps2 = extract_frames_and_skeletons(
+                file_bytes=bufs[1]["bytes"],
+                filename=bufs[1]["name"],
+                model_complexity=model_complexity_option,
+                max_frame_height=MAX_FRAME_HEIGHT
+            )
+        st.session_state.frame_index2 = 0
+
 elif submitted and len(bufs) < 2:
     st.warning("2本の動画を選んでから『解析を開始』を押してください。")
-
-# ---- 動画処理（送信時にだけ実行）----
-if uploaded_file1 is not None and not st.session_state.frames1:
-    with st.spinner("1つ目の動画を処理中..."):
-        st.session_state.frames1, st.session_state.landmarks1, st.session_state.w1, st.session_state.h1, st.session_state.fps1 = extract_frames_and_skeletons(
-            uploaded_file1, model_complexity=model_complexity_option, max_frame_height=MAX_FRAME_HEIGHT
-        )
-    st.session_state.frame_index1 = 0
-
-if uploaded_file2 is not None and not st.session_state.frames2:
-    with st.spinner("2つ目の動画を処理中..."):
-        st.session_state.frames2, st.session_state.landmarks2, st.session_state.w2, st.session_state.h2, st.session_state.fps2 = extract_frames_and_skeletons(
-            uploaded_file2, model_complexity=model_complexity_option, max_frame_height=MAX_FRAME_HEIGHT
-        )
-    st.session_state.frame_index2 = 0
 
 # ---- 比較UI ----
 if st.session_state.frames1 and st.session_state.frames2:
     st.subheader("🎬 フレーム選択で骨格比較")
-    display_w = st.slider("表示画像幅（px）", 200, 800, 350, 10)
+    display_w = st.slider("表示画像幅（px）", 200, 900, 360, 10)
 
     col1, col2 = st.columns(2)
-    # 左（青）
+
     with col1:
         st.subheader("青骨格")
         max1 = len(st.session_state.frames1) - 1
@@ -211,7 +209,6 @@ if st.session_state.frames1 and st.session_state.frames2:
         st.image(f1, channels="BGR", width=display_w)
         st.caption(f"フレーム {idx1+1} / {max1+1}")
 
-    # 右（赤）
     with col2:
         st.subheader("赤骨格")
         max2 = len(st.session_state.frames2) - 1
@@ -225,7 +222,7 @@ if st.session_state.frames1 and st.session_state.frames2:
         st.caption(f"フレーム {idx2+1} / {max2+1}")
 
 elif submitted and (not st.session_state.frames1 or not st.session_state.frames2):
-    st.error("動画の読み込み・解析に失敗しました。コーデックをH.264/MP4にする、長さを短くする（10〜20秒）、解像度を下げる（≤720p）などをお試しください。")
+    st.error("動画の読み込み・解析に失敗しました。コーデックを H.264/MP4 にする、長さを短くする（10〜20秒）、解像度を下げる（≤720p）などをお試しください。")
 
 else:
     st.info("2本の動画を選んで『解析を開始』を押すと比較できます。")
