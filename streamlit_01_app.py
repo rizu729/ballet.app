@@ -24,7 +24,7 @@ def ffmpeg_normalize(input_path: str) -> str:
         "-vf", "scale='min(1280,iw)':-2", "-r", "30",
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-preset", "veryfast", "-crf", "23",
-        "-an",  # 音声を削除
+        "-an",
         out_path
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
@@ -110,8 +110,11 @@ st.title("💃 バレエフォーム比較AI")
 
 st.markdown("""
 ### ご利用方法
-1. 比較したい動画を **2本アップロード**（順に 青 → 赤）
-2. **解析を開始** を押すと、AIが自動で骨格を検出して比較します。
+1. 比較したい動画を **2本アップロード**（順に 青 → 赤）  
+2. **解析を開始** を押すと、AIが自動で骨格を検出して比較します。  
+3. **フレームの操作方法**  
+　・数値を入力すると、任意のフレームを直接表示できます。  
+　・スライダーを動かすと、コマ送りのように前後の動きを確認できます。  
 
 > ℹ️ 変換や設定は不要です（アプリ側で **H.264/MP4・720p・30fps** に自動調整）。  
 > 🎯 最も正確に解析できるのは **1人の全身が映っている動画** です。  
@@ -123,6 +126,10 @@ model_complexity = st.selectbox(
     options=[(0, "低（高速）"), (1, "中（バランス）"), (2, "高（精密）")],
     format_func=lambda x: x[1], index=1
 )[0]
+
+# 手入力・スライダーの状態をセッションに保持
+st.session_state.setdefault("idx1", 0)
+st.session_state.setdefault("idx2", 0)
 
 with st.form("upload"):
     files = st.file_uploader("動画を2本選択（青→赤）", type=["mp4", "mov", "avi"], accept_multiple_files=True)
@@ -147,6 +154,8 @@ if submitted:
             metas.append(get_video_info(norm))
         st.session_state["paths"] = paths
         st.session_state["metas"] = metas
+        st.session_state.idx1 = 0
+        st.session_state.idx2 = 0
 
 if "paths" in st.session_state:
     p1, p2 = st.session_state["paths"]
@@ -156,19 +165,24 @@ if "paths" in st.session_state:
     col1, col2 = st.columns(2)
     disp_w = st.slider("表示サイズ(px)", 200, 900, 360, 10)
 
-    # 操作体験を軽くするため、15fps相当のステップに
+    # スライダーの刻み（15fps相当で軽く）
     step1 = max(1, int((fps1 or 30) // 15))
     step2 = max(1, int((fps2 or 30) // 15))
+    max1 = max(0, t1 - 1)
+    max2 = max(0, t2 - 1)
 
     with col1:
         st.markdown("**青動画**")
-        idx1 = st.slider("フレーム位置", 0, max(0, t1-1), 0, step=step1, key="sld1")
-        f1 = read_frame(p1, idx1)
-        lm1 = detect_landmarks(p1, idx1, model_complexity)
+        num1 = st.number_input("フレーム番号（手入力）", 0, max1, int(st.session_state.idx1), step=1, key="num1_input")
+        sld1 = st.slider("フレーム位置（スライダー）", 0, max1, int(num1), step=step1, key="sld1")
+        st.session_state.idx1 = int(sld1)
+
+        f1 = read_frame(p1, st.session_state.idx1)
+        lm1 = detect_landmarks(p1, st.session_state.idx1, model_complexity)
         if f1 is not None:
             draw_skeleton(f1, lm1, (255,0,0))
             st.image(f1, channels="BGR", width=disp_w)
-            cap = f"フレーム {idx1+1}/{max(1,t1)}"
+            cap = f"フレーム {st.session_state.idx1+1}/{max(1,t1)}"
             if lm1 is None:
                 cap += "（このフレームは未検出）"
             st.caption(cap)
@@ -177,13 +191,16 @@ if "paths" in st.session_state:
 
     with col2:
         st.markdown("**赤動画**")
-        idx2 = st.slider("フレーム位置 ", 0, max(0, t2-1), 0, step=step2, key="sld2")
-        f2 = read_frame(p2, idx2)
-        lm2 = detect_landmarks(p2, idx2, model_complexity)
+        num2 = st.number_input("フレーム番号（手入力） ", 0, max2, int(st.session_state.idx2), step=1, key="num2_input")
+        sld2 = st.slider("フレーム位置（スライダー） ", 0, max2, int(num2), step=step2, key="sld2")
+        st.session_state.idx2 = int(sld2)
+
+        f2 = read_frame(p2, st.session_state.idx2)
+        lm2 = detect_landmarks(p2, st.session_state.idx2, model_complexity)
         if f2 is not None:
             draw_skeleton(f2, lm2, (0,0,255))
             st.image(f2, channels="BGR", width=disp_w)
-            cap = f"フレーム {idx2+1}/{max(1,t2)}"
+            cap = f"フレーム {st.session_state.idx2+1}/{max(1,t2)}"
             if lm2 is None:
                 cap += "（このフレームは未検出）"
             st.caption(cap)
