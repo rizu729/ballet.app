@@ -5,6 +5,7 @@ import tempfile
 import hashlib
 import streamlit as st
 import mediapipe as mp
+import subprocess  # ← 追加：ffmpeg呼び出しに使用
 
 # ----（任意）警告を抑制（必要なエラーのみ表示）----
 os.environ["GLOG_minloglevel"] = "2"
@@ -34,34 +35,81 @@ def draw_skeleton_on_frame(frame, results_pose_landmarks, line_color=(255, 0, 0)
     return frame
 
 
-# ---- 動画→フレーム/骨格抽出（bytes/strのみ。キャッシュは bytes をMD5で正規化）----
-@st.cache_data(show_spinner=False, hash_funcs={bytes: lambda b: hashlib.md5(b).hexdigest()})
+# ---- ffmpeg で H.264/MP4/≤720p/30fps に正規化（必要時のみ呼ぶ）----
+def _ffmpeg_normalize_to_h264_720p(in_path: str) -> str:
+    """
+    失敗しがちな HEVC/MOV や 1080p/4K/VFR を、H.264/MP4/≤720p/30fps に正規化。
+    縦横比は維持。-2 で偶数に揃える。
+    """
+    out_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+    cmd = [
+        "ffmpeg", "-y", "-i", in_path,
+        "-vf", "scale='min(1280,iw)':-2",     # 横最大1280（=720p相当）、縦は自動・偶数
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-preset", "veryfast", "-crf", "23",
+        "-r", "30",                           # 可変フレームレートの揺れ対策
+        "-c:a", "aac", "-b:a", "128k",
+        out_path
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    return out_path
+
+
+# ---- 動画→フレーム/骨格抽出（キャッシュはしない！）----
 def extract_frames_and_skeletons(file_bytes: bytes, filename: str,
                                  model_complexity=1, max_frame_height=640):
     """
     file_bytes: 動画の生バイト
     filename  : 元のファイル名（拡張子取得や表示に使用）
+    戻り値    : (frames(list[np.ndarray BGR]),
+                 landmarks(list[NormalizedLandmarkList|None]),
+                 width, height, fps)
     """
     if not file_bytes:
         return [], [], 0, 0, 0
 
+    # 一時ファイルに書き出し
     suffix = os.path.splitext(filename)[1] or ".mp4"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(file_bytes)
         temp_path = tmp.name
 
+    # 条件に応じて正規化するか判定
+    norm_path = None
+    cap = None
     try:
+        # まずはそのまま開いてみる
         cap = cv2.VideoCapture(temp_path)
-        if not cap.isOpened():
-            return [], [], 0, 0, 0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else 0
+        ow = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if cap.isOpened() else 0
+        oh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) if cap.isOpened() else 0
 
-        frames, landmarks = [], []
+        need_normalize = False
+        # 1) そもそも開けないorフレーム0
+        if (not cap.isOpened()) or total == 0:
+            need_normalize = True
+        # 2) 高解像度（>720p）
+        elif oh and oh > max_frame_height:
+            need_normalize = True
+        # 3) .mov は HEVC 率が高く、環境依存で失敗しやすいので救済
+        elif suffix.lower() == ".mov":
+            need_normalize = True
+
+        if need_normalize:
+            if cap:
+                cap.release()
+            norm_path = _ffmpeg_normalize_to_h264_720p(temp_path)
+            cap = cv2.VideoCapture(norm_path)
+            if not cap.isOpened():
+                return [], [], 0, 0, 0
+
+        # 正式にメタデータを取得し直す
         ow = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
         oh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
         fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
 
-        # リサイズ設定
+        # 表示/処理サイズ（720p以下に）
         nw, nh = ow, oh
         if oh > 0 and oh > max_frame_height:
             nh = max_frame_height
@@ -69,6 +117,7 @@ def extract_frames_and_skeletons(file_bytes: bytes, filename: str,
 
         bar = st.progress(0, text=f"処理中: {os.path.basename(filename)}") if total > 0 else None
 
+        frames, landmarks = [], []
         with mp_pose.Pose(
             static_image_mode=False,
             model_complexity=model_complexity,
@@ -81,12 +130,27 @@ def extract_frames_and_skeletons(file_bytes: bytes, filename: str,
                 ret, frame = cap.read()
                 if not ret:
                     break
+
+                # リサイズ（必要時）
                 if oh > 0 and oh > max_frame_height:
-                    frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
-                image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    try:
+                        frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+                    except Exception:
+                        # 異常フレームはスキップ
+                        idx += 1
+                        continue
+
+                # 色空間変換の保険
+                try:
+                    image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                except Exception:
+                    idx += 1
+                    continue
+
+                # Mediapipe 推定
                 results = pose.process(image_rgb)
                 frames.append(frame)
-                landmarks.append(results.pose_landmarks)
+                landmarks.append(getattr(results, "pose_landmarks", None))
 
                 idx += 1
                 if bar and total > 0:
@@ -97,11 +161,15 @@ def extract_frames_and_skeletons(file_bytes: bytes, filename: str,
             bar.empty()
         cap.release()
         return frames, landmarks, (nw or ow), (nh or oh), fps
+
     finally:
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
+        # 一時ファイル掃除（存在チェックしてから）
+        for p in [temp_path, norm_path]:
+            try:
+                if p and isinstance(p, str) and os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
 
 
 # ---- UI 基本設定 ----
@@ -235,3 +303,4 @@ elif submitted and (not st.session_state.frames1 or not st.session_state.frames2
 
 else:
     st.info("2本の動画を選んで『解析を開始』を押すと比較できます。")
+
