@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import tempfile
 import subprocess
+import time  # ← 再生ティック用に追加
 import streamlit as st
 import mediapipe as mp
 from mediapipe.framework.formats import landmark_pb2
@@ -169,6 +170,36 @@ if "paths" in st.session_state:
     max1 = max(0, t1 - 1)
     max2 = max(0, t2 - 1)
 
+    # ---------- 再生コントロール（追加機能） ----------
+    st.session_state.setdefault("playing", False)
+    st.session_state.setdefault("loop", True)
+    st.session_state.setdefault("play_speed", 1.0)  # 0.5, 1.0, 1.5, 2.0
+    st.session_state.setdefault("sync_play", True)
+
+    ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4 = st.columns([1,1,1,1])
+    with ctrl_col1:
+        if st.button("▶ 再生", use_container_width=True):
+            st.session_state.playing = True
+    with ctrl_col2:
+        if st.button("⏸ 一時停止", use_container_width=True):
+            st.session_state.playing = False
+    with ctrl_col3:
+        if st.button("⏹ 停止", use_container_width=True):
+            st.session_state.playing = False
+            st.session_state.idx1 = 0
+            st.session_state.idx2 = 0
+    with ctrl_col4:
+        st.session_state.sync_play = st.toggle("左右を同期", value=st.session_state.sync_play)
+
+    sp_col1, sp_col2 = st.columns([1,1])
+    with sp_col1:
+        st.session_state.play_speed = st.select_slider(
+            "再生速度", options=[0.5, 1.0, 1.5, 2.0], value=float(st.session_state.play_speed)
+        )
+    with sp_col2:
+        st.session_state.loop = st.toggle("ループ再生", value=st.session_state.loop)
+    # ---------- /再生コントロール（追加機能） ----------
+
     with col1:
         st.markdown("**青動画**")
         # 手入力（1刻み）
@@ -207,6 +238,42 @@ if "paths" in st.session_state:
             st.caption(cap)
         else:
             st.error("フレームの読み込みに失敗しました。")
+
+    # ---------- 再生“1ティック”処理（追加機能） ----------
+    if st.session_state.playing:
+        # 表示負荷を下げるため、15fps相当で前進（正規化後のfpsに応じて刻みを合わせる）
+        base_step1 = max(1, int((fps1 or 30) // 15))
+        base_step2 = max(1, int((fps2 or 30) // 15))
+        speed = float(st.session_state.play_speed)
+
+        # 速度をステップ数に反映（1.5x/2.0xはコマ飛ばし、0.5xは遅延で）
+        step1_advance = max(1, int(round(base_step1 * max(1.0, speed))))
+        step2_advance = max(1, int(round(base_step2 * max(1.0, speed))))
+
+        # 同期/非同期（現状は同じロジック、将来片側だけ進めたい場合に分岐）
+        st.session_state.idx1 += step1_advance
+        st.session_state.idx2 += step2_advance
+
+        # 端で停止 or ループ
+        def advance_or_stop(idx, max_idx):
+            if idx > max_idx:
+                if st.session_state.loop:
+                    return 0, False
+                else:
+                    return max_idx, True
+            return idx, False
+
+        st.session_state.idx1, stop1 = advance_or_stop(st.session_state.idx1, max1)
+        st.session_state.idx2, stop2 = advance_or_stop(st.session_state.idx2, max2)
+        if stop1 or stop2:
+            st.session_state.playing = False
+
+        # 目標は約15fps更新。0.5xはさらに遅延して負荷を下げる
+        target_fps = 15.0 * min(1.0, speed)  # 0.5x → 7.5fps相当
+        delay = 1.0 / max(1.0, target_fps)
+        time.sleep(delay)
+        st.experimental_rerun()
+    # ---------- /再生“1ティック”処理（追加機能） ----------
 
 else:
     st.info("2本の動画を選んで『解析を開始』を押してください。")
